@@ -1,0 +1,6 @@
+.env
+volumes/
+__pycache__/
+*.pyc
+rag-frontend/node_modules/
+*.log

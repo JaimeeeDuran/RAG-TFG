@@ -1,0 +1,127 @@
+name: rag-stack
+
+networks:
+  rag_net:
+    driver: bridge
+
+volumes:
+  ollama_data:
+  milvus_data:
+  milvus_minio_data:
+  milvus_etcd_data:
+
+services:
+  # --------------------------
+  # Ollama (LLM + Embeddings)
+  # --------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    networks: [ rag_net ]
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+    # --- GPU NVIDIA (opcional) ---
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # --------------------------
+  # Milvus Dependencies
+  # --------------------------
+  milvus-etcd:
+    image: quay.io/coreos/etcd:v3.5.9
+    container_name: milvus-etcd
+    command:
+      - etcd
+      - -advertise-client-urls=http://0.0.0.0:2379
+      - -listen-client-urls=http://0.0.0.0:2379
+      - -data-dir=/etcd
+    volumes:
+      - milvus_etcd_data:/etcd
+    networks: [ rag_net ]
+    restart: unless-stopped
+
+  milvus-minio:
+    image: minio/minio:RELEASE.2024-05-28T17-19-04Z
+    container_name: milvus-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - milvus_minio_data:/data
+    networks: [ rag_net ]
+    restart: unless-stopped
+
+  # --------------------------
+  # Milvus Standalone (2.4.x)
+  # --------------------------
+  milvus:
+    image: milvusdb/milvus:v2.4.23
+    container_name: milvus
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: milvus-etcd:2379
+      MINIO_ADDRESS: milvus-minio:9000
+      COMMON_STORAGETYPE: local
+    depends_on:
+      - milvus-etcd
+      - milvus-minio
+    ports:
+      - "19530:19530"  # gRPC client
+      - "9091:9091"    # health/metrics
+    volumes:
+      - milvus_data:/var/lib/milvus
+    networks: [ rag_net ]
+    restart: unless-stopped
+
+  # --------------------------
+  # FastAPI RAG Backend
+  # --------------------------
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: rag-api
+    depends_on:
+      - milvus
+      - ollama
+    ports:
+      - "8010:8000"   # expone la API en el host
+    environment:
+      OLLAMA_URL: "http://ollama:11434"
+      MILVUS_HOST: "milvus"
+      MILVUS_PORT: "19530"
+      EMBED_MODEL: "nomic-embed-text"
+      GENERATION_MODEL: "mistral"
+      TOP_K: "4"
+    volumes:
+      - ./data:/app/data
+    networks: [ rag_net ]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+  frontend:
+    build:
+      context: ./rag-frontend
+      dockerfile: Dockerfile
+    container_name: rag-frontend
+    depends_on:
+      - api
+    ports:
+      - "8080:80"
+    networks:
+      - rag_net
+    restart: unless-stopped

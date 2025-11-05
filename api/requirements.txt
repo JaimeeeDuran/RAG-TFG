@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+pymilvus==2.4.4
+numpy
+requests
+pydantic
+python-multipart
+pypdf
+marshmallow>=3.13,<4
+pymupdf
